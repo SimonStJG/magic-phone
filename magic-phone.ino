@@ -6,6 +6,12 @@
 #include "call.h"
 
 /**
+ * Tracks
+ */
+#define TRACK_INTRO 0
+#define TRACK_RESULT 1
+
+/**
  * Error codes
  */
 #define ERROR_UNABLE_TO_INITALIZE 2
@@ -14,6 +20,7 @@
 #define ERROR_UNABLE_TO_SEND_SMS 5
 #define ERROR_UNABLE_TO_GET_CALL_STATE 6
 #define ERROR_UNABLE_TO_INITIALIZE_AUDIO 7
+#define ERROR_UNABLE_TO_PLAY_TRACK 8
 
 /**
  * Pins
@@ -34,11 +41,18 @@
 #define GSM_BAUD_RATE 4800
 #define DEBUG_SERIAL_BAUD_RATE 19200
 
+enum CallStage {
+  INIT, 
+  INTRO_PLAYING, 
+  AWAIT_DTMF, 
+  RESULT_PLAYING,
+  STOP
+};
+
 /**
  * Notes:
  * Moved Moved GSM on / off pins in SIM900.h
  */
-
 CallGSM call;
 
 SMSGSM sms;
@@ -62,21 +76,12 @@ void setup()
   pinMode(AUDIO_ACT, INPUT);
   Serial.begin(DEBUG_SERIAL_BAUD_RATE);
   audioSerial.begin(AUDIO_BAUD_RATE);  
-  if (!audio.reset())
-  {
-    fail(ERROR_UNABLE_TO_INITIALIZE_AUDIO);
-  }
+  failOnFalse(audio.reset(), ERROR_UNABLE_TO_INITIALIZE_AUDIO);
 
   // Initialize GSM shield.
-  if (gsm.begin(GSM_BAUD_RATE)) 
-  {
-    call.SetDTMF(1);
-  } 
-  else 
-  {
-    fail(ERROR_UNABLE_TO_INITALIZE);
-  }
-
+  failOnFalse(gsm.begin(GSM_BAUD_RATE), ERROR_UNABLE_TO_INITALIZE); 
+  call.SetDTMF(1);
+ 
   digitalWrite(LED_ERROR, LOW);
   digitalWrite(LED_STATUS, LOW);
 }
@@ -120,44 +125,112 @@ void handleIncomingCalls()
   }
 }
 
-/**
- * TODO What if someone hangs up?
- */
 void callActive() 
 {
-//  char dtmf;
-//  char all_dtmf[5] = "";
-//  
-//  while(true)
-//  {
-//    dtmf = call.DetDTMF();
-//    if (dtmf != '-')
-//    {
-//      Serial.print("Found one");
-//      Serial.write(&dtmf, 1);
-//      strncat(all_dtmf, &dtmf, 1);
-//      if (strlen(all_dtmf) >= 4) 
-//      {
-//        break;
-//      }
-//      dtmf = '-';
-//    }
-//  }
-  // TODO Can I get rid of this?
+  CallStage stage = INIT;
   char number[20];
-  int audioStatus;
   byte stat;
-  
-  audio.playTrack((uint8_t) 0);
+
+  Serial.println("callActive");
+    
   while(true) 
   {
-    audioStatus = digitalRead(AUDIO_ACT);
+    stage = getNextCallStage(stage);
+    if (stage == STOP) break;
+
     stat = call.CallStatusWithAuth(number, 0, 0);
-    if (audioStatus == HIGH || stat != CALL_ACTIVE_VOICE) break;
-    delay(500);
+    if (stat != CALL_ACTIVE_VOICE)
+    {
+      Serial.println(stat);
+      Serial.println("Not CALL_ACTIVE_VOICE");
+      break;
+    }
   }
+
+  Serial.print("Exiting");
   audio.stop();
 }
+
+CallStage getNextCallStage(CallStage stage) 
+{
+  Serial.print("getNextCallStage ");
+  Serial.println(stage);
+  
+  int audioStatus;
+  char dtmf;
+  
+  switch (stage) 
+  {
+    case INIT:
+    {
+      Serial.println("INIT Stage");
+      // Initial stage, play intro track.
+      failOnFalse(audio.playTrack((uint8_t) TRACK_INTRO), 
+                  ERROR_UNABLE_TO_PLAY_TRACK);
+
+      // This is a bit of a hack, but if we don't wait for a while here 
+      // then the call to CallStatusWithAuth in callActive returns 
+      // CALL_NONE which obvs breaks everything. 
+      delay(2000);
+
+      stage = INTRO_PLAYING;
+    }
+    break;
+    
+    case INTRO_PLAYING: 
+    {
+      // Intro track playing, wait for it to stop.
+      audioStatus = digitalRead(AUDIO_ACT);
+      if (audioStatus == HIGH)
+      {
+
+        // TODO Maybe go straight to await to avoid poss missing it.
+        
+        stage = AWAIT_DTMF;
+      }
+    }
+    break;
+    
+    case AWAIT_DTMF:
+    {
+      // Waiting for DTMF!  Then either play into again, or result.
+      for (int i = 0; i < 3; i++) 
+      {
+        // This wait for while, but try 3 times to be sure.
+        dtmf = call.DetDTMF();
+        if (dtmf != '-') 
+        {
+          failOnFalse(audio.playTrack((uint8_t) TRACK_RESULT), 
+                  ERROR_UNABLE_TO_PLAY_TRACK);
+          stage = RESULT_PLAYING;
+          break;
+        }
+
+        if (i == 2) 
+        {
+          failOnFalse(audio.playTrack((uint8_t) TRACK_INTRO), 
+                  ERROR_UNABLE_TO_PLAY_TRACK);
+          stage = INTRO_PLAYING;
+        }
+      }
+    }
+    break;
+
+    case RESULT_PLAYING:
+    {
+      // Playing result, stop when audio stops.
+      audioStatus = digitalRead(AUDIO_ACT);
+      if (audioStatus == HIGH)
+      {
+        stage = STOP;
+      }
+    }
+    break;
+  }
+
+  return stage;
+}
+
 
 void handleIncomingSms()
 {
@@ -171,28 +244,39 @@ void handleIncomingSms()
     if (position == 0) break;
     digitalWrite(LED_ERROR, HIGH);
     
-    if (sms.GetSMS(position, phoneNumber, 20, smsText, 50) < 0)
-    {
-      fail(ERROR_UNABLE_TO_GET_SMS_LIST);
-    }
+    failOnNonPositive(sms.GetSMS(position, phoneNumber, 20, smsText, 50), 
+                   ERROR_UNABLE_TO_GET_SMS_LIST);
     
     // Somehow, giffgaff send you messages all the f***ing time, whose originator 
     // address is just "giffgaff.", and others where the originator is blank.  
     // Then everything explodes if you try and reply.  So we ignore these.
     if (strcmp("", phoneNumber) != 0 &&
-        strncmp("giffgaff", phoneNumber, 8) != 0 &&
-        sms.SendSMS(phoneNumber, "This number only accepts phone calls.") <= 0) 
+        strncmp("giffgaff", phoneNumber, 8) != 0) 
     {
-      fail(ERROR_UNABLE_TO_SEND_SMS);
+      failOnNonPositive(sms.SendSMS(phoneNumber, "This number only accepts phone calls."),
+                        ERROR_UNABLE_TO_SEND_SMS);
     }
-     
-    if (!sms.DeleteSMS(position))
-    {
-      fail(ERROR_UNABLE_TO_DELETE_SMS);
-    }
+
+    failOnFalse(sms.DeleteSMS(position), ERROR_UNABLE_TO_DELETE_SMS);
     digitalWrite(LED_ERROR, LOW);
   }
   
+}
+
+void failOnFalse(bool b, int errorCode) 
+{
+  if (!b) 
+  {
+    fail(errorCode);
+  }
+}
+
+void failOnNonPositive(int i, int errorCode)
+{
+  if (i <= 0)
+  {
+    fail(errorCode);
+  }
 }
 
 void pulseStatusLed()
