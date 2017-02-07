@@ -1,6 +1,11 @@
 #include "SIM900.h"
 #include <SoftwareSerial.h>
+
+//#define EXCLUDE_AUDIO
+
+#ifndef EXCLUDE_AUDIO
 #include "Adafruit_Soundboard.h"
+#endif
 
 #include "sms.h"
 #include "call.h"
@@ -25,8 +30,6 @@
 /**
  * Pins
  */
-#define AUDIO_TX 2
-#define AUDIO_RX 3
 #define AUDIO_RST 4
 #define AUDIO_ACT 5
 
@@ -57,9 +60,10 @@ CallGSM call;
 
 SMSGSM sms;
 
-SoftwareSerial audioSerial = SoftwareSerial(AUDIO_TX, AUDIO_RX);
+#ifndef EXCLUDE_AUDIO
 Adafruit_Soundboard audio = Adafruit_Soundboard(
-  &audioSerial, NULL, AUDIO_RST);
+  &Serial, NULL, AUDIO_RST);
+#endif
 
 // TODO Disable voicemail!
 // TODO Mention that DTMF tones need to be held down for a long time..
@@ -74,13 +78,20 @@ void setup()
 
   // Initialise Audio board.
   pinMode(AUDIO_ACT, INPUT);
-  Serial.begin(DEBUG_SERIAL_BAUD_RATE);
-  audioSerial.begin(AUDIO_BAUD_RATE);  
+
+  Serial.begin(AUDIO_BAUD_RATE);  
+#ifndef EXCLUDE_AUDIO
   failOnFalse(audio.reset(), ERROR_UNABLE_TO_INITIALIZE_AUDIO);
+#endif
 
   // Initialize GSM shield.
   failOnFalse(gsm.begin(GSM_BAUD_RATE), ERROR_UNABLE_TO_INITALIZE); 
   call.SetDTMF(1);
+
+#ifndef EXCLUDE_AUDIO
+  failOnFalse(audio.playTrack((uint8_t) 4), 
+                  ERROR_UNABLE_TO_PLAY_TRACK);
+#endif
  
   digitalWrite(LED_ERROR, LOW);
   digitalWrite(LED_STATUS, LOW);
@@ -105,7 +116,14 @@ void handleIncomingCalls()
     case CALL_INCOM_VOICE_NOT_AUTH:
       digitalWrite(LED_STATUS, HIGH);
       call.PickUp();
-      callActive();
+#ifndef EXCLUDE_AUDIO
+      failOnFalse(audio.playTrack((uint8_t) TRACK_INTRO), 
+                  ERROR_UNABLE_TO_PLAY_TRACK);
+#endif
+      delay(30000);
+#ifndef EXCLUDE_AUDIO
+      audio.stop();
+#endif
       call.HangUp();
       digitalWrite(LED_STATUS, LOW);
       break;
@@ -131,31 +149,22 @@ void callActive()
   char number[20];
   byte stat;
 
-  Serial.println("callActive");
-    
   while(true) 
   {
     stage = getNextCallStage(stage);
     if (stage == STOP) break;
 
     stat = call.CallStatusWithAuth(number, 0, 0);
-    if (stat != CALL_ACTIVE_VOICE)
-    {
-      Serial.println(stat);
-      Serial.println("Not CALL_ACTIVE_VOICE");
-      break;
-    }
+    if (stat != CALL_ACTIVE_VOICE) break;
   }
 
-  Serial.print("Exiting");
+#ifndef EXCLUDE_AUDIO
   audio.stop();
+#endif
 }
 
 CallStage getNextCallStage(CallStage stage) 
-{
-  Serial.print("getNextCallStage ");
-  Serial.println(stage);
-  
+{ 
   int audioStatus;
   char dtmf;
   
@@ -163,11 +172,10 @@ CallStage getNextCallStage(CallStage stage)
   {
     case INIT:
     {
-      Serial.println("INIT Stage");
-      // Initial stage, play intro track.
-      failOnFalse(audio.playTrack((uint8_t) TRACK_INTRO), 
+#ifndef EXCLUDE_AUDIO 
+      failOnFalse(audio.playTrack((uint8_t) 4), 
                   ERROR_UNABLE_TO_PLAY_TRACK);
-
+#endif
       // This is a bit of a hack, but if we don't wait for a while here 
       // then the call to CallStatusWithAuth in callActive returns 
       // CALL_NONE which obvs breaks everything. 
@@ -179,15 +187,18 @@ CallStage getNextCallStage(CallStage stage)
     
     case INTRO_PLAYING: 
     {
+#ifdef EXCLUDE_AUDIO
+      stage  = AWAIT_DTMF;
+#else  
       // Intro track playing, wait for it to stop.
       audioStatus = digitalRead(AUDIO_ACT);
       if (audioStatus == HIGH)
       {
-
         // TODO Maybe go straight to await to avoid poss missing it.
         
         stage = AWAIT_DTMF;
       }
+#endif
     }
     break;
     
@@ -200,16 +211,20 @@ CallStage getNextCallStage(CallStage stage)
         dtmf = call.DetDTMF();
         if (dtmf != '-') 
         {
-          failOnFalse(audio.playTrack((uint8_t) TRACK_RESULT), 
+#ifndef EXCLUDE_AUDIO
+          failOnFalse(audio.playTrack((uint8_t) 0), 
                   ERROR_UNABLE_TO_PLAY_TRACK);
+#endif
           stage = RESULT_PLAYING;
           break;
         }
 
         if (i == 2) 
         {
-          failOnFalse(audio.playTrack((uint8_t) TRACK_INTRO), 
+#ifndef EXCLUDE_AUDIO
+          failOnFalse(audio.playTrack((uint8_t) 1), 
                   ERROR_UNABLE_TO_PLAY_TRACK);
+#endif
           stage = INTRO_PLAYING;
         }
       }
@@ -218,12 +233,16 @@ CallStage getNextCallStage(CallStage stage)
 
     case RESULT_PLAYING:
     {
+#ifdef EXCLUDE_AUDIO
+      stage = STOP;
+#else
       // Playing result, stop when audio stops.
       audioStatus = digitalRead(AUDIO_ACT);
       if (audioStatus == HIGH)
       {
         stage = STOP;
       }
+#endif
     }
     break;
   }
