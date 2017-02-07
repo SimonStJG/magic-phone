@@ -30,6 +30,8 @@
 /**
  * Pins
  */
+#define AUDIO_RX 2
+#define AUDIO_TX 3
 #define AUDIO_RST 4
 #define AUDIO_ACT 5
 
@@ -61,8 +63,9 @@ CallGSM call;
 SMSGSM sms;
 
 #ifndef EXCLUDE_AUDIO
+SoftwareSerial audioSerial = SoftwareSerial(AUDIO_TX, AUDIO_RX);
 Adafruit_Soundboard audio = Adafruit_Soundboard(
-  &Serial, NULL, AUDIO_RST);
+  &audioSerial, NULL, AUDIO_RST);
 #endif
 
 // TODO Disable voicemail!
@@ -79,7 +82,7 @@ void setup()
   // Initialise Audio board.
   pinMode(AUDIO_ACT, INPUT);
 
-  Serial.begin(AUDIO_BAUD_RATE);  
+  audioSerial.begin(AUDIO_BAUD_RATE);  
 #ifndef EXCLUDE_AUDIO
   failOnFalse(audio.reset(), ERROR_UNABLE_TO_INITIALIZE_AUDIO);
 #endif
